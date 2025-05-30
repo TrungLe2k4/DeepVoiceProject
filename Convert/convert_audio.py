@@ -1,85 +1,80 @@
 import os
 import librosa
 import soundfile as sf
-from tqdm import tqdm
 from pydub import AudioSegment, effects
+import numpy as np
+from tqdm import tqdm
 
-# Đường dẫn
+# ========== Cấu hình ===========
 input_root = "D:/DeepVoice/Audio"
-output_clean_root = "D:/DeepVoice/Audio_Cleaned"
-log_file_path = "D:/DeepVoice/error_log.txt"
-
-# Tham số
+output_root = "D:/DeepVoice/Audio_Cleaned"
 target_sr = 16000
-target_duration = 5.0  # giây
-target_length = int(target_sr * target_duration)
-
-# Xóa file log cũ nếu có
-if os.path.exists(log_file_path):
-    os.remove(log_file_path)
-
-error_logs = []
+duration = 5  # giây
+target_length = target_sr * duration
 labels = ["real", "fake"]
 
-def noise_reduction(audio, sr):
-    """
-    Giảm noise bằng thư viện noisereduce nếu có.
-    """
+# ========== Hàm xử lý âm thanh ==========
+def process_audio(input_path, output_path):
     try:
-        import noisereduce as nr
-        return nr.reduce_noise(y=audio, sr=sr)
-    except ImportError:
-        print("Chưa cài thư viện noisereduce, bỏ qua bước tách noise.")
-        return audio
+        # Chuyển âm thanh thành mono
+        audio = AudioSegment.from_file(input_path).set_channels(1)
+        
+        # Nếu âm thanh ngắn hơn 5 giây, bỏ qua
+        if audio.duration_seconds < 5:
+            return None, f"Quá ngắn: {audio.duration_seconds:.2f}s"
+        
+        # Chuẩn hóa âm lượng
+        normalized = effects.normalize(audio)
+        samples = np.array(normalized.get_array_of_samples()).astype(np.float32) / 32768.0
+        if np.abs(samples).mean() < 0.01:  # Kiểm tra âm lượng
+            return None, "Âm lượng quá nhỏ"
+
+        # Lưu lại tạm thời sau khi chuẩn hóa
+        temp_wav = "temp.wav"
+        normalized.export(temp_wav, format="wav")
+
+        # Cắt tĩnh trong âm thanh
+        y, _ = librosa.load(temp_wav, sr=target_sr)
+        y_trimmed, _ = librosa.effects.trim(y, top_db=30)  # Loại bỏ tĩnh
+
+        # Cắt hoặc giữ lại đủ 5 giây
+        y_final = librosa.util.fix_length(y_trimmed, size=target_length)
+        
+        # Lưu âm thanh đã xử lý
+        sf.write(output_path, y_final, target_sr)
+        return True, ""
+    except Exception as e:
+        return None, str(e)
+
+# ========== Xử lý dữ liệu ==========
+os.makedirs(output_root, exist_ok=True)
+error_log = []
 
 for label in labels:
     input_folder = os.path.join(input_root, label)
-    output_clean_folder = os.path.join(output_clean_root, label)
-    os.makedirs(output_clean_folder, exist_ok=True)
+    output_folder = os.path.join(output_root, label)
+    os.makedirs(output_folder, exist_ok=True)
 
-    print(f"Đang xử lý thư mục: {label}")
+    files = [f for f in os.listdir(input_folder) if f.lower().endswith(('.wav', '.mp3', '.flac'))]
+    print(f"📁 {label}: {len(files)} file đầu vào")
 
-    for file_name in tqdm(os.listdir(input_folder), desc=f"Xử lý {label}"):
-        if file_name.endswith(('.mp3', '.wav', '.flac')):
-            file_path = os.path.join(input_folder, file_name)
-            try:
-                # Load và chuẩn hóa
-                audio, sr = librosa.load(file_path, sr=target_sr, mono=True)
-                audio = noise_reduction(audio, sr)
+    for file_name in tqdm(files, desc=f"Xử lý {label}"):
+        input_path = os.path.join(input_folder, file_name)
+        output_name = file_name.rsplit('.', 1)[0] + ".wav"
+        output_path = os.path.join(output_folder, output_name)
 
-                # Cắt hoặc đệm để đủ 5 giây
-                if len(audio) < target_length:
-                    audio = librosa.util.fix_length(audio, size=target_length)
-                else:
-                    audio = audio[:target_length]
+        ok, msg = process_audio(input_path, output_path)
+        if not ok:
+            error_log.append((file_name, msg))
 
-                # Ghi tạm vào bộ nhớ để normalize bằng pydub
-                temp_path = os.path.join(output_clean_folder, "temp.wav")
-                sf.write(temp_path, audio, sr)
+    print(f"📤 Sau xử lý {label}: {len(os.listdir(output_folder))} file")
 
-                # Normalize
-                segment = AudioSegment.from_wav(temp_path)
-                normalized = effects.normalize(segment)
+# ========== Ghi log lỗi ==========
+if error_log:
+    log_path = os.path.join(output_root, "convert_audio_error_log.txt")
+    with open(log_path, "w", encoding="utf-8") as logf:
+        for name, msg in error_log:
+            logf.write(f"{name}: {msg}\\n")
+    print(f"⚠️ Ghi log lỗi tại: {log_path}")
 
-                # Ghi kết quả cuối
-                output_path = os.path.join(output_clean_folder, file_name.rsplit('.', 1)[0] + ".wav")
-                normalized.export(output_path, format="wav")
-
-                # Xoá file tạm
-                if os.path.exists(temp_path):
-                    os.remove(temp_path)
-
-            except Exception as e:
-                reason = f"[PROCESS] {file_name} ({label}): {e}"
-                print(reason)
-                error_logs.append(reason)
-
-# Ghi log lỗi
-if error_logs:
-    with open(log_file_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(error_logs))
-    print(f"\nCó {len(error_logs)} lỗi. Xem chi tiết tại: {log_file_path}")
-else:
-    print("\nKhông có lỗi nào xảy ra!")
-
-print("\nHoàn tất xử lý toàn bộ âm thanh.")
+print("✅ Đã xử lý toàn bộ audio.")

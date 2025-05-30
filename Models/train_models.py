@@ -1,136 +1,150 @@
 import os
+import joblib
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split, cross_val_score
-from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import StratifiedKFold, GridSearchCV, RandomizedSearchCV
 from sklearn.svm import SVC
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay, accuracy_score
 from xgboost import XGBClassifier
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, confusion_matrix
+import matplotlib
 import matplotlib.pyplot as plt
-import joblib
+import seaborn as sns
 
-# Thư mục chứa file đặc trưng CSV
-FEATURE_DIR = "D:/DeepVoice/Dataset"
+# Chuyển matplotlib sang backend 'Agg' để tránh lỗi GUI
+matplotlib.use('Agg')
 
-# Thư mục gốc để lưu các mô hình
-BASE_MODEL_DIR = "D:/DeepVoice/Models"
+dataset_folder = "D:/DeepVoice/Dataset"
+output_folder = "D:/DeepVoice/Models"
+os.makedirs(output_folder, exist_ok=True)
 
-# Map tên feature sang thư mục tương ứng
-FEATURE_FOLDER_MAP = {
-    "fft_mfcc": "FFT_MFCC",
-    "vgg512": "VGG16",
-    "logmel": "LogMel"
-}
+features = [
+    ("fft_mfcc_train.csv", "FFT_MFCC"),
+    ("logmel_train.csv", "LogMel"),
+    ("vgg16_train.csv", "VGG16")
+]
 
-def train_and_save_models(feature_name, df):
-    print(f"\n=== Huấn luyện mô hình cho: {feature_name} ===")
+def save_model_and_results(model, scaler, le, cm, feature_name, model_name):
+    model_folder = os.path.join(output_folder, feature_name)
+    os.makedirs(model_folder, exist_ok=True)
 
-    # Tạo thư mục lưu kết quả cho đặc trưng này
-    model_dir = os.path.join(BASE_MODEL_DIR, FEATURE_FOLDER_MAP[feature_name])
-    os.makedirs(model_dir, exist_ok=True)
+    cm_filename = os.path.join(model_folder, f"{model_name}_confusion_matrix.png")
+    model_filename = os.path.join(model_folder, f"{model_name}_model.pkl")
+    scaler_filename = os.path.join(model_folder, f"{model_name}_scaler.pkl")
+    labelencoder_filename = os.path.join(model_folder, f"{model_name}_labelencoder.pkl")
 
-    # ==== Xác định cột nhãn ====
-    label_column = None
-    for col in ["label", "Lable", "target", "class"]:
-        if col in df.columns:
-            label_column = col
-            break
-    if label_column is None:
-        raise ValueError("Không tìm thấy cột nhãn trong dữ liệu.")
+    # Save confusion matrix
+    plt.figure(figsize=(5,4))
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=le.classes_, yticklabels=le.classes_)
+    plt.title(f"Confusion Matrix - {model_name} ({feature_name})")
+    plt.xlabel("Predicted")
+    plt.ylabel("Actual")
+    plt.tight_layout()
+    plt.savefig(cm_filename)
+    plt.close()
 
-    y = df[label_column]
+    # Save model, scaler, and label encoder
+    joblib.dump(model, model_filename)
+    joblib.dump(scaler, scaler_filename)
+    joblib.dump(le, labelencoder_filename)
+    print(f"Đã lưu model, scaler, label encoder, confusion matrix for {model_name} ({feature_name}).")
 
-    # Nếu label là chuỗi 'real'/'fake' thì chuyển thành số
-    if y.dtype == object or y.dtype == "string":
-        y = y.map({"real": 0, "fake": 1})
+def grid_search_svm(X, y):
+    param_grid = {
+        'C': [0.1, 0.5, 1, 5, 10, 50],
+        'kernel': ['linear', 'rbf', 'poly'],
+        'gamma': ['scale', 'auto', 0.001, 0.01, 0.1, 1]
+    }
+    svc = SVC(probability=True)
+    grid = GridSearchCV(svc, param_grid, cv=5, scoring='f1', n_jobs=-1, verbose=2)
+    grid.fit(X, y)
+    print("SVM best params:", grid.best_params_)
+    return grid.best_estimator_
 
-    # ==== Tạo X và y ====
-    drop_cols = [col for col in ["file", "file_name", label_column] if col in df.columns]
-    X = df.drop(columns=drop_cols)
+def grid_search_rf(X, y):
+    param_grid = {
+        'n_estimators': [100, 200, 500],
+        'max_depth': [5, 10, 20, None],
+        'min_samples_split': [2, 5, 10],
+        'min_samples_leaf': [1, 2, 4],
+        'max_features': ['sqrt', 'log2', None],
+        'bootstrap': [True, False]
+    }
+    rf = RandomForestClassifier(random_state=42)
+    grid = GridSearchCV(rf, param_grid, cv=5, scoring='f1', n_jobs=-1, verbose=2)
+    grid.fit(X, y)
+    print("RF best params:", grid.best_params_)
+    return grid.best_estimator_
 
-    # Chuẩn hóa dữ liệu
+results = []
+
+for feature_file, feature_name in features:
+    print(f"\n=== Training with feature {feature_name} ===")
+    data = pd.read_csv(os.path.join(dataset_folder, feature_file))
+    X = data.drop(["file", "label"], axis=1)
+    y = data["label"]
+
+    le = LabelEncoder()
+    y = le.fit_transform(y)
+    print(f"Classes: {le.classes_}")
+
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
 
-    # Lưu scaler
-    scaler_path = os.path.join(model_dir, f"{feature_name}_scaler.pkl")
-    joblib.dump(scaler, scaler_path)
+    models = ["SVM", "RandomForest", "XGBoost"]
 
-    # Tách train/test
-    X_train, X_test, y_train, y_test = train_test_split(X_scaled, y, test_size=0.2, random_state=42)
+    for model_name in models:
+        print(f"\nTraining model {model_name} with feature {feature_name}...")
 
-    # ==== SVM ====
-    svm_model = SVC(kernel="linear", probability=True)
-    svm_model.fit(X_train, y_train)
-    svm_path = os.path.join(model_dir, f"{feature_name}_svm.pkl")
-    joblib.dump(svm_model, svm_path)
+        if model_name == "SVM":
+            best_model = grid_search_svm(X_scaled, y)
+        elif model_name == "RandomForest":
+            best_model = grid_search_rf(X_scaled, y)
+        else:
+            best_model = XGBClassifier(eval_metric='logloss', max_depth=3, reg_lambda=2.0, subsample=0.8, random_state=42)
+            best_model.fit(X_scaled, y)
 
-    # Cross-validation SVM
-    svm_scores = cross_val_score(svm_model, X_train, y_train, cv=5)
-    print(f"[SVM] Độ chính xác trung bình (CV): {svm_scores.mean():.4f}")
+        model = best_model
 
-    # Confusion matrix SVM
-    y_pred_svm = svm_model.predict(X_test)
-    acc_svm = accuracy_score(y_test, y_pred_svm)
-    cm_svm = confusion_matrix(y_test, y_pred_svm)
-    disp_svm = ConfusionMatrixDisplay(cm_svm, display_labels=["Real", "Fake"])
-    disp_svm.plot()
-    plt.title(f"{feature_name} - SVM - Accuracy: {acc_svm:.4f}")
-    plt.savefig(os.path.join(model_dir, f"{feature_name}_svm_cm.png"))
-    plt.close()
+        kf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+        cv_accuracies, cv_precisions, cv_recalls, cv_f1_scores, cv_roc_aucs = [], [], [], [], []
 
-    # ==== Random Forest ====
-    rf_model = RandomForestClassifier(n_estimators=100, random_state=42)
-    rf_model.fit(X_train, y_train)
-    rf_path = os.path.join(model_dir, f"{feature_name}_rf.pkl")
-    joblib.dump(rf_model, rf_path)
+        for train_idx, test_idx in kf.split(X_scaled, y):
+            X_train, X_test = X_scaled[train_idx], X_scaled[test_idx]
+            y_train, y_test = y[train_idx], y[test_idx]
 
-    # Cross-validation RF
-    rf_scores = cross_val_score(rf_model, X_train, y_train, cv=5)
-    print(f"[RandomForest] Độ chính xác trung bình (CV): {rf_scores.mean():.4f}")
+            model.fit(X_train, y_train)
+            y_pred = model.predict(X_test)
+            y_prob = model.predict_proba(X_test)[:, 1]
 
-    # Confusion matrix RF
-    y_pred_rf = rf_model.predict(X_test)
-    acc_rf = accuracy_score(y_test, y_pred_rf)
-    cm_rf = confusion_matrix(y_test, y_pred_rf)
-    disp_rf = ConfusionMatrixDisplay(cm_rf, display_labels=["Real", "Fake"])
-    disp_rf.plot()
-    plt.title(f"{feature_name} - RF - Accuracy: {acc_rf:.4f}")
-    plt.savefig(os.path.join(model_dir, f"{feature_name}_rf_cm.png"))
-    plt.close()
-    # ==== XGBoost ====
-    xgb_model = XGBClassifier(eval_metric='logloss', random_state=42)
-    xgb_model.fit(X_train, y_train)
-    xgb_path = os.path.join(model_dir, f"{feature_name}_xgb.pkl")
-    joblib.dump(xgb_model, xgb_path)
+            cv_accuracies.append(accuracy_score(y_test, y_pred))
+            cv_precisions.append(precision_score(y_test, y_pred))
+            cv_recalls.append(recall_score(y_test, y_pred))
+            cv_f1_scores.append(f1_score(y_test, y_pred))
+            cv_roc_aucs.append(roc_auc_score(y_test, y_prob))
 
-    # Cross-validation XGBoost
-    xgb_scores = cross_val_score(xgb_model, X_train, y_train, cv=5)
-    print(f"[XGBoost] Độ chính xác trung bình (CV): {xgb_scores.mean():.4f}")
+        avg_acc = np.mean(cv_accuracies)
+        avg_prec = np.mean(cv_precisions)
+        avg_rec = np.mean(cv_recalls)
+        avg_f1 = np.mean(cv_f1_scores)
+        avg_auc = np.mean(cv_roc_aucs)
 
-    # Confusion matrix XGBoost
-    y_pred_xgb = xgb_model.predict(X_test)
-    acc_xgb = accuracy_score(y_test, y_pred_xgb)
-    cm_xgb = confusion_matrix(y_test, y_pred_xgb)
-    disp_xgb = ConfusionMatrixDisplay(cm_xgb, display_labels=["Real", "Fake"])
-    disp_xgb.plot()
-    plt.title(f"{feature_name} - XGBoost - Accuracy: {acc_xgb:.4f}")
-    plt.savefig(os.path.join(model_dir, f"{feature_name}_xgb_cm.png"))
-    plt.close()
+        print(f"Model: {model_name} ({feature_name})")
+        print(f"  Accuracy: {avg_acc*100:.2f}%")
+        print(f"  Precision: {avg_prec*100:.2f}%")
+        print(f"  Recall: {avg_rec*100:.2f}%")
+        print(f"  F1-Score: {avg_f1*100:.2f}%")
+        print(f"  ROC-AUC: {avg_auc*100:.2f}%")
 
+        results.append([feature_name, model_name, avg_acc*100, avg_prec*100, avg_rec*100, avg_f1*100, avg_auc*100])
 
-# ==== Danh sách các file đặc trưng ====
-csv_files = {
-    "fft_mfcc": os.path.join(FEATURE_DIR, "fft_mfcc.csv"),
-    "vgg512": os.path.join(FEATURE_DIR, "vgg512_features.csv"),
-    "logmel": os.path.join(FEATURE_DIR, "logmel_features.csv")
-}
+        cm = confusion_matrix(y_test, y_pred)
+        save_model_and_results(model, scaler, le, cm, feature_name, model_name)
 
-# ==== Huấn luyện cho từng file ====
-for name, path in csv_files.items():
-    if os.path.exists(path):
-        df = pd.read_csv(path)
-        train_and_save_models(name, df)
-    else:
-        print(f"Không tìm thấy file đặc trưng: {path}")
+summary_df = pd.DataFrame(results, columns=["Feature_Set", "Model", "Accuracy", "Precision", "Recall", "F1_Score", "ROC_AUC"])
+summary_csv_path = os.path.join(output_folder, "summary_metrics.csv")
+summary_df.to_csv(summary_csv_path, index=False)
+
+print("\nSaved all metrics summary at:", summary_csv_path)
+print("\nTraining completed for all models and features.")

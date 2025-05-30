@@ -1,0 +1,13 @@
+File,Model,Best_Feature,Label,Probability
+fake_0128.wav,SVM,LogMel,REAL,0.9899
+fake_0128.wav,RandomForest,FFT_MFCC,FAKE,0.95
+fake_0128.wav,XGBoost,LogMel,FAKE,0.9937999844551086
+fake_0278.wav,SVM,LogMel,REAL,0.9899
+fake_0278.wav,RandomForest,FFT_MFCC,FAKE,0.95
+fake_0278.wav,XGBoost,FFT_MFCC,FAKE,0.9897000193595886
+test01.wav,SVM,LogMel,REAL,0.9899
+test01.wav,RandomForest,FFT_MFCC,FAKE,0.95
+test01.wav,XGBoost,FFT_MFCC,FAKE,0.9950000047683716
+test02.wav,SVM,LogMel,REAL,0.9899
+test02.wav,RandomForest,VGG16,REAL,0.8995
+test02.wav,XGBoost,VGG16,REAL,0.9947999715805054
